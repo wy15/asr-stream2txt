@@ -1,6 +1,6 @@
 # asr-stream2txt
 
-本地 macOS CLI 工具，基于 [`antirez/qwen-asr`](https://github.com/antirez/qwen-asr) 做中文优先的实时麦克风转写，并把文本持续保存到本地文件。
+本地 macOS CLI 工具，基于 [`antirez/qwen-asr`](https://github.com/antirez/qwen-asr) 做中文优先的实时麦克风转写，并把文本与可选的压缩录音持续保存到本地文件。
 
 ## Requirements
 
@@ -81,6 +81,29 @@ npm install
   --prompt "Preserve spelling: CUDA, PostgreSQL, Redis"
 ```
 
+如果你想在转写的同时把麦克风音频压缩保存到本地，推荐直接开 `Opus`：
+
+```bash
+./bin/asr-stream2txt.mjs start \
+  --save-audio \
+  --audio-dir ./data/audio \
+  --audio-format opus
+```
+
+如果你想按时长自动切片，比如每 30 分钟切一个录音文件：
+
+```bash
+./bin/asr-stream2txt.mjs start \
+  --save-audio \
+  --audio-format opus \
+  --audio-segment-minutes 30
+```
+
+支持的录音格式：
+
+- `opus`: 默认值，语音压缩率高，适合长时间实时录音
+- `flac`: 无损压缩，但文件会明显更大
+
 ## Output Format
 
 日志按天落盘，每行一段：
@@ -94,6 +117,26 @@ npm install
 - 收到首个稳定文本时开始计时
 - 连续 2200ms 没有新文本时 flush
 - 退出时强制 flush 最后一段
+
+如果启用了 `--save-audio`，录音文件会保存到：
+
+```text
+data/audio/YYYY-MM-DD/HHmmss.opus
+```
+
+或：
+
+```text
+data/audio/YYYY-MM-DD/HHmmss.flac
+```
+
+如果启用了 `--audio-segment-minutes`，文件名会变成：
+
+```text
+data/audio/YYYY-MM-DD/HHmmss-000.opus
+data/audio/YYYY-MM-DD/HHmmss-001.opus
+...
+```
 
 ## Troubleshooting
 

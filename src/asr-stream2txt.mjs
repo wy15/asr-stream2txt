@@ -11,6 +11,7 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 export const PINNED_QWEN_ASR_REF = "b00b789b17051aea61e9717458171100662318a4";
 export const DEFAULT_MODEL_DIR = path.join(REPO_ROOT, "models", "qwen3-asr-0.6b");
 export const DEFAULT_OUTPUT_DIR = path.join(REPO_ROOT, "data", "transcripts");
+export const DEFAULT_AUDIO_DIR = path.join(REPO_ROOT, "data", "audio");
 export const DEFAULT_VENDOR_DIR = path.join(REPO_ROOT, "vendor", "qwen-asr");
 export const DEFAULT_FLUSH_DELAY_MS = 2200;
 
@@ -82,6 +83,52 @@ export function transcriptFileName(date) {
   ].join("-") + ".txt";
 }
 
+export function audioDateDirName(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+export function audioTimeFileStem(date) {
+  return [
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+    String(date.getSeconds()).padStart(2, "0"),
+  ].join("");
+}
+
+export function resolveAudioExtension(audioFormat) {
+  if (audioFormat === "opus") return "opus";
+  if (audioFormat === "flac") return "flac";
+  throw new Error(`Unsupported audio format: ${audioFormat}`);
+}
+
+export function resolveAudioOutputPaths({ audioDir, audioFormat, startedAt, segmentMinutes = 0 }) {
+  const dateDir = path.join(audioDir, audioDateDirName(startedAt));
+  const stem = audioTimeFileStem(startedAt);
+  const extension = resolveAudioExtension(audioFormat);
+
+  if (segmentMinutes > 0) {
+    const pattern = path.join(dateDir, `${stem}-%03d.${extension}`);
+    return {
+      audioDir: dateDir,
+      audioPath: pattern,
+      displayPath: pattern,
+      segmented: true,
+    };
+  }
+
+  const audioPath = path.join(dateDir, `${stem}.${extension}`);
+  return {
+    audioDir: dateDir,
+    audioPath,
+    displayPath: audioPath,
+    segmented: false,
+  };
+}
+
 export function formatTranscriptLine(segment) {
   return `[${formatClock(segment.startAt)} - ${formatClock(segment.endAt)}] ${segment.text}`;
 }
@@ -150,6 +197,10 @@ function parseStartOptions(args) {
     deviceIndex: null,
     modelDir: DEFAULT_MODEL_DIR,
     outputDir: DEFAULT_OUTPUT_DIR,
+    audioDir: DEFAULT_AUDIO_DIR,
+    audioFormat: "opus",
+    audioSegmentMinutes: 0,
+    saveAudio: false,
     language: "Chinese",
     prompt: "",
     help: false,
@@ -180,6 +231,30 @@ function parseStartOptions(args) {
       case "--output-dir":
         if (next === undefined) throw new Error("--output-dir requires a value");
         options.outputDir = path.resolve(next);
+        index += 1;
+        break;
+      case "--save-audio":
+        options.saveAudio = true;
+        break;
+      case "--audio-dir":
+        if (next === undefined) throw new Error("--audio-dir requires a value");
+        options.audioDir = path.resolve(next);
+        index += 1;
+        break;
+      case "--audio-format":
+        if (next === undefined) throw new Error("--audio-format requires a value");
+        if (!["opus", "flac"].includes(next)) {
+          throw new Error("--audio-format must be one of: opus, flac");
+        }
+        options.audioFormat = next;
+        index += 1;
+        break;
+      case "--audio-segment-minutes":
+        if (next === undefined) throw new Error("--audio-segment-minutes requires a value");
+        options.audioSegmentMinutes = Number(next);
+        if (!Number.isFinite(options.audioSegmentMinutes) || options.audioSegmentMinutes <= 0) {
+          throw new Error("--audio-segment-minutes must be a positive number");
+        }
         index += 1;
         break;
       case "--language":
@@ -217,6 +292,10 @@ start options:
   --device-index <n>        AVFoundation audio device index (default: recommended device)
   --model-dir <path>        qwen-asr model directory (default: ${DEFAULT_MODEL_DIR})
   --output-dir <path>       Transcript output directory (default: ${DEFAULT_OUTPUT_DIR})
+  --save-audio              Save live microphone audio locally while transcribing
+  --audio-dir <path>        Recorded audio output directory (default: ${DEFAULT_AUDIO_DIR})
+  --audio-format <fmt>      Recorded audio format: opus or flac (default: opus)
+  --audio-segment-minutes <n>  Split saved audio every N minutes (default: off)
   --language <lang|auto>    Force language, or auto to omit --language (default: Chinese)
   --prompt <text>           Optional qwen-asr prompt
 
@@ -339,8 +418,8 @@ function buildQwenArgs({ modelDir, language, prompt }) {
   return args;
 }
 
-function buildFfmpegArgs(deviceIndex) {
-  return [
+export function buildFfmpegArgs(deviceIndex, audioSaveOptions = null) {
+  const args = [
     "-nostdin",
     "-hide_banner",
     "-loglevel",
@@ -349,6 +428,8 @@ function buildFfmpegArgs(deviceIndex) {
     "avfoundation",
     "-i",
     `:${deviceIndex}`,
+    "-map",
+    "0:a:0",
     "-f",
     "s16le",
     "-ar",
@@ -357,6 +438,70 @@ function buildFfmpegArgs(deviceIndex) {
     "1",
     "pipe:1",
   ];
+
+  if (!audioSaveOptions) return args;
+
+  if (audioSaveOptions.audioSegmentMinutes > 0) {
+    const segmentSeconds = String(Math.round(audioSaveOptions.audioSegmentMinutes * 60));
+    args.push(
+      "-map",
+      "0:a:0",
+      "-f",
+      "segment",
+      "-segment_time",
+      segmentSeconds,
+      "-reset_timestamps",
+      "1",
+      "-segment_start_number",
+      "0",
+      "-segment_format",
+      audioSaveOptions.audioFormat,
+    );
+
+    if (audioSaveOptions.audioFormat === "opus") {
+      args.push(
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "24k",
+        "-vbr",
+        "on",
+        "-compression_level",
+        "10",
+        audioSaveOptions.audioPath,
+      );
+      return args;
+    }
+
+    if (audioSaveOptions.audioFormat === "flac") {
+      args.push("-c:a", "flac", audioSaveOptions.audioPath);
+      return args;
+    }
+  }
+
+  if (audioSaveOptions.audioFormat === "opus") {
+    args.push(
+      "-map",
+      "0:a:0",
+      "-c:a",
+      "libopus",
+      "-b:a",
+      "24k",
+      "-vbr",
+      "on",
+      "-compression_level",
+      "10",
+      audioSaveOptions.audioPath,
+    );
+    return args;
+  }
+
+  if (audioSaveOptions.audioFormat === "flac") {
+    args.push("-map", "0:a:0", "-c:a", "flac", audioSaveOptions.audioPath);
+    return args;
+  }
+
+  throw new Error(`Unsupported audio format: ${audioSaveOptions.audioFormat}`);
 }
 
 export async function runSetup({ cwd = REPO_ROOT, stdout = process.stdout, stderr = process.stderr } = {}) {
@@ -389,6 +534,7 @@ export async function runStart(
     stderr = process.stderr,
     on = process.on.bind(process),
     off = process.off.bind(process),
+    now = () => new Date(),
   } = {},
 ) {
   await ensureFileExists(qwenBin, `Missing qwen_asr binary at ${qwenBin}. Run 'asr-stream2txt setup' first.`);
@@ -412,11 +558,35 @@ export async function runStart(
   }
 
   await fs.mkdir(options.outputDir, { recursive: true });
+  const startedAt = now();
+  let audioOutput = null;
+  if (options.saveAudio) {
+    audioOutput = resolveAudioOutputPaths({
+      audioDir: options.audioDir,
+      audioFormat: options.audioFormat,
+      startedAt,
+      segmentMinutes: options.audioSegmentMinutes,
+    });
+    await fs.mkdir(audioOutput.audioDir, { recursive: true });
+  }
 
-  const ffmpegArgs = buildFfmpegArgs(selectedDevice.index);
+  const ffmpegArgs = buildFfmpegArgs(
+    selectedDevice.index,
+    audioOutput
+      ? {
+          audioFormat: options.audioFormat,
+          audioPath: audioOutput.audioPath,
+          audioSegmentMinutes: options.audioSegmentMinutes,
+        }
+      : null,
+  );
   const qwenArgs = buildQwenArgs(options);
   stdout.write(`Using audio device ${selectedDevice.index}: ${selectedDevice.name}\n`);
   stdout.write(`Writing transcripts to ${options.outputDir}\n`);
+  if (audioOutput) {
+    const action = audioOutput.segmented ? "Recording segmented audio to " : "Recording audio to ";
+    stdout.write(`${action}${audioOutput.displayPath}\n`);
+  }
 
   const ffmpeg = spawnProcess(ffmpegBin, ffmpegArgs);
   const qwen = spawnProcess(qwenBin, qwenArgs);
