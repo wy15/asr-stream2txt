@@ -13,6 +13,7 @@
 ## Requirements
 
 - macOS Apple Silicon
+- Python 3.12+
 - `uv`
 - `ffmpeg`
 
