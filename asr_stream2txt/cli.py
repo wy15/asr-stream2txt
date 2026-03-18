@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import inspect
 import math
 import os
 import queue
@@ -159,9 +160,22 @@ class SpeechSegmenter:
 
 
 class AudioWriter:
-    def __init__(self, process: subprocess.Popen[bytes], output_hint: str) -> None:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        output_hint: str,
+        *,
+        output_dir: Path,
+        base_stem: str,
+        extension: str,
+        segmented: bool,
+    ) -> None:
         self.process = process
         self.output_hint = output_hint
+        self.output_dir = output_dir
+        self.base_stem = base_stem
+        self.extension = extension
+        self.segmented = segmented
 
     @classmethod
     def create(
@@ -189,6 +203,7 @@ class AudioWriter:
                 segment_minutes=segment_minutes,
             )
             output_hint = str(output_path)
+            segmented = True
         else:
             output_path = audio_dir / f"{base_stem}.{extension}"
             args = build_audio_writer_args(
@@ -197,6 +212,7 @@ class AudioWriter:
                 segment_minutes=0,
             )
             output_hint = str(output_path)
+            segmented = False
 
         process = subprocess.Popen(
             args,
@@ -206,7 +222,14 @@ class AudioWriter:
         )
         if process.stdin is None or process.stderr is None:
             raise RuntimeError("Failed to start ffmpeg audio writer.")
-        return cls(process=process, output_hint=output_hint)
+        return cls(
+            process=process,
+            output_hint=output_hint,
+            output_dir=audio_dir,
+            base_stem=base_stem,
+            extension=extension,
+            segmented=segmented,
+        )
 
     def write(self, pcm_bytes: bytes) -> None:
         if self.process.stdin is None:
@@ -214,13 +237,15 @@ class AudioWriter:
         self.process.stdin.write(pcm_bytes)
         self.process.stdin.flush()
 
-    def close(self) -> None:
+    def close(self, *, interrupted: bool = False) -> None:
         stderr = b""
         if self.process.stdin is not None:
             self.process.stdin.close()
         if self.process.stderr is not None:
             stderr = self.process.stderr.read()
         code = self.process.wait()
+        if interrupted and code in (255, -2, 130):
+            return
         if code != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"ffmpeg audio writer failed with code {code}: {detail}")
@@ -236,6 +261,7 @@ class TranscriptionWorker(threading.Thread):
         system_prompt: str | None,
         task_queue: "queue.Queue[Utterance | None]",
         stdout,
+        ready_event: threading.Event,
     ) -> None:
         super().__init__(daemon=True)
         self.model_name = model_name
@@ -244,12 +270,16 @@ class TranscriptionWorker(threading.Thread):
         self.system_prompt = system_prompt
         self.task_queue = task_queue
         self.stdout = stdout
+        self.ready_event = ready_event
         self.error: Exception | None = None
         self._model = None
+        self.written_segments = 0
 
     def run(self) -> None:
         try:
             self._model = load_model(self.model_name)
+            validate_loaded_model(self.model_name, self._model)
+            self.ready_event.set()
             while True:
                 task = self.task_queue.get()
                 try:
@@ -260,6 +290,7 @@ class TranscriptionWorker(threading.Thread):
                     self.task_queue.task_done()
         except Exception as exc:  # noqa: BLE001
             self.error = exc
+            self.ready_event.set()
             while True:
                 try:
                     self.task_queue.get_nowait()
@@ -288,6 +319,7 @@ class TranscriptionWorker(threading.Thread):
             handle.write(f"{line}\n")
         self.stdout.write(f"{line}\n")
         self.stdout.flush()
+        self.written_segments += 1
 
 
 def transcript_file_name(moment: dt.datetime) -> str:
@@ -379,6 +411,23 @@ def build_audio_writer_args(*, audio_format: str, output_path: Path, segment_min
     raise ValueError(f"Unsupported audio format: {audio_format}")
 
 
+def validate_loaded_model(model_name: str, model) -> None:  # noqa: ANN001
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if model_type == "qwen3_forced_aligner" or "forcedaligner" in model_name.lower():
+        raise RuntimeError(
+            "The selected model is a forced aligner, not a speech-to-text model. "
+            "Use 'mlx-community/Qwen3-ASR-0.6B-4bit' instead."
+        )
+
+    signature = inspect.signature(model.generate)
+    text_param = signature.parameters.get("text")
+    if text_param is not None and text_param.default is inspect._empty:
+        raise RuntimeError(
+            "The selected model requires existing transcript text for alignment and cannot do speech-to-text. "
+            "Use 'mlx-community/Qwen3-ASR-0.6B-4bit' instead."
+        )
+
+
 def list_input_devices() -> list[DeviceInfo]:
     devices: list[DeviceInfo] = []
     for index, item in enumerate(sd.query_devices()):
@@ -444,7 +493,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run_setup(model_name: str) -> int:
     print(f"Caching model: {model_name}")
-    load_model(model_name)
+    model = load_model(model_name)
+    validate_loaded_model(model_name, model)
     print("Model is ready.")
     return 0
 
@@ -520,8 +570,14 @@ def run_start(config: RuntimeConfig) -> int:
         system_prompt=config.prompt or None,
         task_queue=transcribe_queue,
         stdout=sys.stdout,
+        ready_event=threading.Event(),
     )
     worker.start()
+    print(f"Loading model {config.model} ...")
+    worker.ready_event.wait()
+    if worker.error:
+        raise worker.error
+    print("Model ready.")
 
     segmenter = SpeechSegmenter(
         sample_rate=SAMPLE_RATE,
@@ -539,6 +595,14 @@ def run_start(config: RuntimeConfig) -> int:
         if stop_event.is_set():
             return
         capture_queue.put(bytes(indata))
+
+    def process_chunk(chunk: bytes) -> None:
+        if audio_writer is not None:
+            audio_writer.write(chunk)
+        pcm = np.frombuffer(chunk, dtype=np.int16).copy()
+        now = dt.datetime.now()
+        for utterance in segmenter.push(pcm, now):
+            transcribe_queue.put(utterance)
 
     def request_stop(signum, frame):  # noqa: ANN001
         del frame
@@ -560,31 +624,37 @@ def run_start(config: RuntimeConfig) -> int:
             callback=callback,
         ):
             print("Listening...")
-            while not stop_event.is_set():
+            while True:
                 try:
                     chunk = capture_queue.get(timeout=QUEUE_POLL_SECONDS)
                 except queue.Empty:
                     if worker.error:
                         raise worker.error
+                    if stop_event.is_set():
+                        break
                     continue
 
                 if chunk is None:
                     continue
 
-                if audio_writer is not None:
-                    audio_writer.write(chunk)
-
-                pcm = np.frombuffer(chunk, dtype=np.int16).copy()
-                now = dt.datetime.now()
-                for utterance in segmenter.push(pcm, now):
-                    transcribe_queue.put(utterance)
+                process_chunk(chunk)
 
                 if worker.error:
                     raise worker.error
+                if stop_event.is_set() and capture_queue.empty():
+                    break
     finally:
         stop_event.set()
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
+        while True:
+            try:
+                chunk = capture_queue.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                if chunk is not None:
+                    process_chunk(chunk)
         now = dt.datetime.now()
         for utterance in segmenter.flush(now):
             transcribe_queue.put(utterance)
@@ -592,7 +662,7 @@ def run_start(config: RuntimeConfig) -> int:
         transcribe_queue.join()
         worker.join(timeout=1)
         if audio_writer is not None:
-            audio_writer.close()
+            audio_writer.close(interrupted=stop_event.is_set())
         if worker.error:
             raise worker.error
 
