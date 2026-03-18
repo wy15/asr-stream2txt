@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 
 import {
   TranscriptBuffer,
+  chooseRecommendedDevice,
   formatTranscriptLine,
   listAudioDevices,
   parseAvfoundationAudioDevices,
@@ -57,6 +58,15 @@ test("TranscriptBuffer flushes remaining text on close", async () => {
 
   assert.equal(flushed.length, 1);
   assert.equal(flushed[0].text, "你好世界");
+});
+
+test("chooseRecommendedDevice avoids virtual audio devices", () => {
+  const recommended = chooseRecommendedDevice([
+    { index: 0, name: "Microsoft Teams Audio" },
+    { index: 1, name: "qiAirPods3" },
+  ]);
+
+  assert.deepEqual(recommended, { index: 1, name: "qiAirPods3" });
 });
 
 test("sanitizeSegmentText and transcriptFileName normalize output", () => {
@@ -155,6 +165,7 @@ printf '世界'
   });
 
   assert.equal(exitCode, 0, stderr);
+  assert.match(stdout, /Using audio device 0: MacBook Air Microphone/);
   assert.match(stdout, /你好世界/);
 
   const files = await fs.readdir(outputDir);

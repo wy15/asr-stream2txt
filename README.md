@@ -48,7 +48,7 @@ npm install
 ./bin/asr-stream2txt.mjs devices
 ```
 
-输出会标记一个推荐设备。第一版默认用 index `0`，也可以在 `start` 里显式指定。
+输出会标记一个推荐设备。`start` 默认会自动选择推荐设备，也可以显式传 `--device-index` 覆盖。
 
 ### `start`
 

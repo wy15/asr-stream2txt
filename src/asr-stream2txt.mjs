@@ -44,9 +44,10 @@ export function chooseRecommendedDevice(devices) {
   const score = (device) => {
     const name = device.name.toLowerCase();
     let value = 0;
-    if (/(macbook|built-in|internal)/.test(name)) value += 30;
-    if (/(microphone|mic|麦克风)/.test(name)) value += 20;
-    if (/blackhole|teams|zoom|loopback/.test(name)) value -= 10;
+    if (/(macbook|built-in|internal)/.test(name)) value += 40;
+    if (/(^|[^a-z])(microphone|mic)([^a-z]|$)|麦克风/.test(name)) value += 30;
+    if (/(airpods|headset|headphones|earpods)/.test(name)) value += 15;
+    if (/(blackhole|teams|zoom|loopback|soundflower|obs)/.test(name)) value -= 50;
     return value;
   };
 
@@ -146,11 +147,12 @@ export class TranscriptBuffer {
 
 function parseStartOptions(args) {
   const options = {
-    deviceIndex: 0,
+    deviceIndex: null,
     modelDir: DEFAULT_MODEL_DIR,
     outputDir: DEFAULT_OUTPUT_DIR,
     language: "Chinese",
     prompt: "",
+    help: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -158,6 +160,10 @@ function parseStartOptions(args) {
     const next = args[index + 1];
 
     switch (arg) {
+      case "-h":
+      case "--help":
+        options.help = true;
+        break;
       case "--device-index":
         if (next === undefined) throw new Error("--device-index requires a value");
         options.deviceIndex = Number(next);
@@ -208,7 +214,7 @@ Commands:
   start                     Start live microphone transcription
 
 start options:
-  --device-index <n>        AVFoundation audio device index (default: 0)
+  --device-index <n>        AVFoundation audio device index (default: recommended device)
   --model-dir <path>        qwen-asr model directory (default: ${DEFAULT_MODEL_DIR})
   --output-dir <path>       Transcript output directory (default: ${DEFAULT_OUTPUT_DIR})
   --language <lang|auto>    Force language, or auto to omit --language (default: Chinese)
@@ -394,15 +400,22 @@ export async function runStart(
       "No AVFoundation audio input devices found. Grant microphone access to your terminal in System Settings and retry.",
     );
   }
-  if (!deviceInfo.devices.some((device) => device.index === options.deviceIndex)) {
-    throw new Error(`Audio device index ${options.deviceIndex} not found. Run 'asr-stream2txt devices' to inspect available inputs.`);
+  const selectedDevice =
+    options.deviceIndex === null
+      ? deviceInfo.recommended ?? deviceInfo.devices[0]
+      : deviceInfo.devices.find((device) => device.index === options.deviceIndex);
+
+  if (!selectedDevice) {
+    throw new Error(
+      `Audio device index ${options.deviceIndex} not found. Run 'asr-stream2txt devices' to inspect available inputs.`,
+    );
   }
 
   await fs.mkdir(options.outputDir, { recursive: true });
 
-  const ffmpegArgs = buildFfmpegArgs(options.deviceIndex);
+  const ffmpegArgs = buildFfmpegArgs(selectedDevice.index);
   const qwenArgs = buildQwenArgs(options);
-  stdout.write(`Using audio device ${options.deviceIndex}\n`);
+  stdout.write(`Using audio device ${selectedDevice.index}: ${selectedDevice.name}\n`);
   stdout.write(`Writing transcripts to ${options.outputDir}\n`);
 
   const ffmpeg = spawnProcess(ffmpegBin, ffmpegArgs);
@@ -520,6 +533,10 @@ export async function main(argv, io = {}) {
       }
       case "start": {
         const options = parseStartOptions(rest);
+        if (options.help) {
+          stdout.write(`${usage()}\n`);
+          break;
+        }
         await runStart(options, io);
         break;
       }
