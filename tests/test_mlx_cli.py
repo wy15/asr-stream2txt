@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from asr_stream2txt.cli import (
+    AudioWriter,
     DeviceInfo,
     SpeechSegmenter,
     build_audio_writer_args,
@@ -17,10 +18,49 @@ from asr_stream2txt.cli import (
     sanitize_text,
     time_file_stem,
     transcript_file_name,
+    validate_loaded_model,
 )
 
 
 class CliHelpersTest(unittest.TestCase):
+    def test_audio_writer_close_ignores_expected_interrupt_exit(self) -> None:
+        class DummyStream:
+            def close(self) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b""
+
+        class DummyProcess:
+            stdin = DummyStream()
+            stderr = DummyStream()
+
+            def wait(self) -> int:
+                return 255
+
+        writer = AudioWriter(
+            DummyProcess(),
+            "/tmp/fake.opus",
+            output_dir=Path("/tmp"),
+            base_stem="fake",
+            extension="opus",
+            segmented=False,
+        )
+        writer.close(interrupted=True)
+
+    def test_validate_loaded_model_rejects_forced_aligner(self) -> None:
+        class FakeConfig:
+            model_type = "qwen3_forced_aligner"
+
+        class FakeModel:
+            config = FakeConfig()
+
+            def generate(self, audio, text, language="Chinese"):  # noqa: ANN001
+                return audio, text, language
+
+        with self.assertRaises(RuntimeError):
+            validate_loaded_model("mlx-community/Qwen3-ForcedAligner-0.6B-4bit", FakeModel())
+
     def test_choose_recommended_device_avoids_virtual_audio(self) -> None:
         device = choose_recommended_device(
             [
