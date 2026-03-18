@@ -1,136 +1,111 @@
 # asr-stream2txt
 
-本地 macOS CLI 工具，基于 [`antirez/qwen-asr`](https://github.com/antirez/qwen-asr) 做中文优先的实时麦克风转写，并把文本与可选的压缩录音持续保存到本地文件。
+这个分支是 `mlx-audio` 版本，核心引擎改成了 `mlx-community/Qwen3-ASR-0.6B-4bit`，面向 macOS 本机实时麦克风转写。
+
+能力范围：
+
+- 实时监听麦克风
+- 中文优先转写，默认 `--language Chinese`
+- 文本按天追加保存到本地
+- 可选同时保存压缩录音
+- 可选按时长自动切片录音
 
 ## Requirements
 
-- macOS arm64
+- macOS Apple Silicon
+- `uv`
 - `ffmpeg`
-- `git`
-- `make`
-- Node.js 20+
 
-## Quick Start
+## Setup
+
+先创建并同步虚拟环境：
 
 ```bash
-npm install
-./bin/asr-stream2txt.mjs setup
-./bin/asr-stream2txt.mjs devices
-./bin/asr-stream2txt.mjs start
+uv venv .venv
+uv sync
 ```
 
-首次运行前，给你的终端应用打开麦克风权限：
+首次下载模型缓存：
 
-- System Settings
-- Privacy & Security
-- Microphone
+```bash
+./bin/asr-stream2txt setup
+```
+
+默认模型：
+
+- `mlx-community/Qwen3-ASR-0.6B-4bit`
 
 ## Commands
 
-### `setup`
-
-拉取固定版本的 `qwen-asr`，编译 `qwen_asr`，并下载 `Qwen3-ASR-0.6B` 到本地：
+列出输入设备：
 
 ```bash
-./bin/asr-stream2txt.mjs setup
+./bin/asr-stream2txt devices
 ```
 
-默认目录：
+当前这台机器上，Python 版枚举到的输入设备索引和 `ffmpeg` 版不同，实际以 `devices` 输出为准。
 
-- `vendor/qwen-asr`
-- `models/qwen3-asr-0.6b`
-
-### `devices`
-
-列出 `AVFoundation` 音频输入设备：
+开始实时转写：
 
 ```bash
-./bin/asr-stream2txt.mjs devices
+./bin/asr-stream2txt start
 ```
 
-输出会标记一个推荐设备。`start` 默认会自动选择推荐设备，也可以显式传 `--device-index` 覆盖。
-
-### `start`
-
-开始实时转写并把结果写到 `data/transcripts/YYYY-MM-DD.txt`：
+显式指定设备：
 
 ```bash
-./bin/asr-stream2txt.mjs start
+./bin/asr-stream2txt start --device-index 2
 ```
 
-常用参数：
+同时保存压缩录音：
 
 ```bash
-./bin/asr-stream2txt.mjs start \
-  --device-index 0 \
-  --model-dir ./models/qwen3-asr-0.6b \
-  --output-dir ./data/transcripts \
-  --language Chinese
+./bin/asr-stream2txt start --save-audio
 ```
 
-如果想让模型自动识别语言：
+每 30 分钟切一个录音文件：
 
 ```bash
-./bin/asr-stream2txt.mjs start --language auto
-```
-
-如果你要给模型轻微纠偏术语：
-
-```bash
-./bin/asr-stream2txt.mjs start \
-  --prompt "Preserve spelling: CUDA, PostgreSQL, Redis"
-```
-
-如果你想在转写的同时把麦克风音频压缩保存到本地，推荐直接开 `Opus`：
-
-```bash
-./bin/asr-stream2txt.mjs start \
-  --save-audio \
-  --audio-dir ./data/audio \
-  --audio-format opus
-```
-
-如果你想按时长自动切片，比如每 30 分钟切一个录音文件：
-
-```bash
-./bin/asr-stream2txt.mjs start \
+./bin/asr-stream2txt start \
   --save-audio \
   --audio-format opus \
   --audio-segment-minutes 30
 ```
 
-支持的录音格式：
+如果你要关闭语言强制，让模型自己判断：
 
-- `opus`: 默认值，语音压缩率高，适合长时间实时录音
-- `flac`: 无损压缩，但文件会明显更大
+```bash
+./bin/asr-stream2txt start --language auto
+```
 
-## Output Format
+如果你要给模型一些术语提示：
 
-日志按天落盘，每行一段：
+```bash
+./bin/asr-stream2txt start \
+  --prompt "保留术语拼写：CUDA, PostgreSQL, Redis"
+```
+
+## Output
+
+文本输出默认在：
+
+```text
+data/transcripts/YYYY-MM-DD.txt
+```
+
+每行格式：
 
 ```text
 [09:15:02 - 09:15:07] 你好，今天我们继续看这个需求。
 ```
 
-分段规则：
-
-- 收到首个稳定文本时开始计时
-- 连续 2200ms 没有新文本时 flush
-- 退出时强制 flush 最后一段
-
-如果启用了 `--save-audio`，录音文件会保存到：
+录音输出默认在：
 
 ```text
 data/audio/YYYY-MM-DD/HHmmss.opus
 ```
 
-或：
-
-```text
-data/audio/YYYY-MM-DD/HHmmss.flac
-```
-
-如果启用了 `--audio-segment-minutes`，文件名会变成：
+如果启用自动切片：
 
 ```text
 data/audio/YYYY-MM-DD/HHmmss-000.opus
@@ -138,22 +113,17 @@ data/audio/YYYY-MM-DD/HHmmss-001.opus
 ...
 ```
 
-## Troubleshooting
+## Notes
 
-`devices` 没有看到内置麦克风：
-
-- 确认终端已获得麦克风权限
-- 重新打开终端后再试
-- 先执行 `ffmpeg -f avfoundation -list_devices true -i ""`
-
-`start` 提示 5 秒内没有音频：
-
-- 检查 `--device-index`
-- 确认麦克风没有被别的应用独占
-- 先用 `devices` 看当前 index
+- 这个分支不再依赖 `antirez/qwen-asr` 做推理核心。
+- 录音压缩仍然通过 `ffmpeg` 完成，因为它在 `Opus/FLAC` 输出和切片上更稳。
+- 转写分段目前是“本地实时分段 + utterance 级转写”，不是 token 级终端流式打印。
+- 输入设备索引来自 `sounddevice`，不要和旧版 `ffmpeg avfoundation` 索引混用。
 
 ## Development
 
+跑 Python 测试：
+
 ```bash
-npm test
+./.venv/bin/python -m unittest discover -s tests -v
 ```
