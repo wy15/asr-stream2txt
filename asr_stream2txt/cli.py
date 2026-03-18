@@ -3,15 +3,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import inspect
-import math
-import os
 import queue
 import shutil
 import signal
 import subprocess
 import sys
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,7 +100,9 @@ class SpeechSegmenter:
                 self._speech_chunks = [chunk.copy() for chunk, _ in self._pre_roll]
                 self._speech_chunks.append(pcm.copy())
                 self._speech_duration = self._pre_roll_duration + duration
-                self._segment_start_at = now - dt.timedelta(seconds=self._speech_duration)
+                self._segment_start_at = now - dt.timedelta(
+                    seconds=self._speech_duration
+                )
                 self._last_speech_at = now
             return utterances
 
@@ -114,15 +113,14 @@ class SpeechSegmenter:
             self._last_speech_at = now
 
         silence_elapsed = (
-            (now - self._last_speech_at).total_seconds() if self._last_speech_at else 0.0
+            (now - self._last_speech_at).total_seconds()
+            if self._last_speech_at
+            else 0.0
         )
 
-        if (
-            self._speech_duration >= self.max_segment_seconds
-            or (
-                silence_elapsed >= self.silence_seconds
-                and self._speech_duration >= self.min_speech_seconds
-            )
+        if self._speech_duration >= self.max_segment_seconds or (
+            silence_elapsed >= self.silence_seconds
+            and self._speech_duration >= self.min_speech_seconds
         ):
             utterance = self._finalize(now)
             if utterance is not None:
@@ -142,7 +140,11 @@ class SpeechSegmenter:
             self._pre_roll_duration -= removed_duration
 
     def _finalize(self, now: dt.datetime) -> Utterance | None:
-        if not self._speech_active or not self._speech_chunks or self._segment_start_at is None:
+        if (
+            not self._speech_active
+            or not self._speech_chunks
+            or self._segment_start_at is None
+        ):
             self._reset()
             return None
 
@@ -188,7 +190,9 @@ class AudioWriter:
     ) -> "AudioWriter":
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
-            raise RuntimeError("ffmpeg is required for --save-audio but was not found in PATH.")
+            raise RuntimeError(
+                "ffmpeg is required for --save-audio but was not found in PATH."
+            )
 
         audio_dir = audio_dir / date_dir_name(started_at)
         audio_dir.mkdir(parents=True, exist_ok=True)
@@ -338,7 +342,9 @@ def format_clock(moment: dt.datetime) -> str:
     return f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}"
 
 
-def format_transcript_line(start_at: dt.datetime, end_at: dt.datetime, text: str) -> str:
+def format_transcript_line(
+    start_at: dt.datetime, end_at: dt.datetime, text: str
+) -> str:
     return f"[{format_clock(start_at)} - {format_clock(end_at)}] {text}"
 
 
@@ -354,7 +360,9 @@ def resolve_audio_extension(audio_format: str) -> str:
     raise ValueError(f"Unsupported audio format: {audio_format}")
 
 
-def build_audio_writer_args(*, audio_format: str, output_path: Path, segment_minutes: float) -> list[str]:
+def build_audio_writer_args(
+    *, audio_format: str, output_path: Path, segment_minutes: float
+) -> list[str]:
     ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     args = [
         ffmpeg,
@@ -453,9 +461,21 @@ def choose_recommended_device(devices: Iterable[DeviceInfo]) -> DeviceInfo | Non
             score += 40
         if any(token in name for token in ("microphone", "mic", "麦克风")):
             score += 30
-        if any(token in name for token in ("airpods", "headset", "headphones", "earpods")):
+        if any(
+            token in name for token in ("airpods", "headset", "headphones", "earpods")
+        ):
             score += 15
-        if any(token in name for token in ("teams", "zoom", "loopback", "blackhole", "obs", "soundflower")):
+        if any(
+            token in name
+            for token in (
+                "teams",
+                "zoom",
+                "loopback",
+                "blackhole",
+                "obs",
+                "soundflower",
+            )
+        ):
             score -= 50
         ranked.append((score, -device.index, device))
     if not ranked:
@@ -468,12 +488,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="asr-stream2txt")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    setup_parser = subparsers.add_parser("setup", help="Download/cache the default MLX model")
+    setup_parser = subparsers.add_parser(
+        "setup", help="Download/cache the default MLX model"
+    )
     setup_parser.add_argument("--model", default=DEFAULT_MODEL)
 
     subparsers.add_parser("devices", help="List input devices from sounddevice")
 
-    start_parser = subparsers.add_parser("start", help="Start realtime microphone transcription")
+    start_parser = subparsers.add_parser(
+        "start", help="Start realtime microphone transcription"
+    )
     start_parser.add_argument("--device-index", type=int, default=None)
     start_parser.add_argument("--model", default=DEFAULT_MODEL)
     start_parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -481,7 +505,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     start_parser.add_argument("--prompt", default="")
     start_parser.add_argument("--save-audio", action="store_true")
     start_parser.add_argument("--audio-dir", type=Path, default=DEFAULT_AUDIO_DIR)
-    start_parser.add_argument("--audio-format", choices=("opus", "flac"), default="opus")
+    start_parser.add_argument(
+        "--audio-format", choices=("opus", "flac"), default="opus"
+    )
     start_parser.add_argument("--audio-segment-minutes", type=float, default=0.0)
     start_parser.add_argument("--rms-threshold", type=float, default=0.012)
     start_parser.add_argument("--silence-seconds", type=float, default=0.8)
@@ -506,7 +532,11 @@ def run_devices() -> int:
         print("No input devices found.", file=sys.stderr)
         return 1
     for device in devices:
-        suffix = " (recommended)" if recommended and device.index == recommended.index else ""
+        suffix = (
+            " (recommended)"
+            if recommended and device.index == recommended.index
+            else ""
+        )
         print(f"[{device.index}] {device.name}{suffix}")
     return 0
 
@@ -539,7 +569,9 @@ def run_start(config: RuntimeConfig) -> int:
     selected = (
         choose_recommended_device(devices)
         if config.device_index is None
-        else next((device for device in devices if device.index == config.device_index), None)
+        else next(
+            (device for device in devices if device.index == config.device_index), None
+        )
     )
     if selected is None:
         raise RuntimeError(f"Device index {config.device_index} not found.")
@@ -557,7 +589,11 @@ def run_start(config: RuntimeConfig) -> int:
             segment_minutes=config.audio_segment_minutes,
             started_at=started_at,
         )
-        prefix = "Recording segmented audio to" if config.audio_segment_minutes > 0 else "Recording audio to"
+        prefix = (
+            "Recording segmented audio to"
+            if config.audio_segment_minutes > 0
+            else "Recording audio to"
+        )
         print(f"{prefix} {audio_writer.output_hint}")
 
     capture_queue: "queue.Queue[bytes | None]" = queue.Queue()
